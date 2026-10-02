@@ -1,0 +1,89 @@
+# Kyverno ClusterPolicy — enforce OWASP Kubernetes Top 10 K01 hardening
+# (Insecure Workload Configurations) across the whole cluster.
+#
+# This is the Kubernetes equivalent of an AWS Service Control Policy: it is a
+# PREVENTIVE guardrail. Instead of hoping every author remembers to harden their
+# pod, the cluster REJECTS any pod that violates these rules at admission time —
+# before the object is ever created. "Enforce in one place" rather than
+# per-manifest discipline.
+#
+# validationFailureAction: Enforce  -> actually block violations.
+#   (Use Audit instead to only report violations without blocking — useful when
+#    first rolling a policy out so you don't break existing workloads.)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pod-hardening
+  annotations:
+    policies.kyverno.io/title: Require Pod Hardening (OWASP K8s K01)
+    policies.kyverno.io/description: >-
+      Pods must run as non-root, disallow privilege escalation, and drop all
+      Linux capabilities. Mirrors the securityContext applied in the lab's
+      Deployment, enforced cluster-wide.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+  # ---------------------------------------------------------------------------
+  # Rule 1: must run as non-root.
+  # ---------------------------------------------------------------------------
+  - name: require-run-as-non-root
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: >-
+        Pods must run as non-root. Set
+        spec.securityContext.runAsNonRoot: true (or on every container).
+      anyPattern:
+      # Satisfied either at the pod level...
+      - spec:
+          securityContext:
+            runAsNonRoot: true
+      # ...or on every container individually.
+      - spec:
+          containers:
+          - securityContext:
+              runAsNonRoot: true
+
+  # ---------------------------------------------------------------------------
+  # Rule 2: no privilege escalation.
+  # ---------------------------------------------------------------------------
+  - name: disallow-privilege-escalation
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: >-
+        Privilege escalation must be disabled. Set
+        allowPrivilegeEscalation: false on every container's securityContext.
+      pattern:
+        spec:
+          containers:
+          - securityContext:
+              allowPrivilegeEscalation: false
+
+  # ---------------------------------------------------------------------------
+  # Rule 3: drop all Linux capabilities.
+  # ---------------------------------------------------------------------------
+  - name: require-drop-all-capabilities
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: >-
+        Containers must drop ALL Linux capabilities. Set
+        securityContext.capabilities.drop: ["ALL"] on every container.
+      pattern:
+        spec:
+          containers:
+          - securityContext:
+              capabilities:
+                drop:
+                - ALL
