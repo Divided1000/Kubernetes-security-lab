@@ -14,6 +14,9 @@ least privilege, and vulnerability management — on a minimal, easy-to-read app
 > and documenting what I learned (including the gaps I haven't closed yet).
 > It's a living project; the roadmap at the bottom tracks what I'm learning next.
 
+See [`THREAT_MODEL.md`](./THREAT_MODEL.md) for the security reasoning behind the
+lab — assets, trust boundaries, STRIDE analysis, what's out of scope and why.
+
 ## Learning goals
 
 - Work through the **OWASP Kubernetes Top 10** by implementing and verifying real controls
@@ -44,13 +47,13 @@ about what's done and what I'm still learning:
 | # | OWASP K8s risk | Status in this lab |
 |---|----------------|--------------------|
 | K01 | Insecure Workload Configurations | 🟢 Addressed — non-root `securityContext` (`runAsNonRoot`, dropped capabilities, `readOnlyRootFilesystem`, `seccompProfile`), resource limits, liveness/readiness probes |
-| K02 | Supply Chain Vulnerabilities | 🟢 Addressed — Trivy image scan + triage; base image patched |
+| K02 | Supply Chain Vulnerabilities | 🟢 Addressed — Trivy image scan + triage; base image patched; Trivy runs in CI on every push |
 | K03 | Overly Permissive RBAC | 🟢 Addressed — read-only `Role` scoped to `get`/`list` only |
-| K04 | Lack of Centralized Policy Enforcement | 🔴 Learning next — admission control / Pod Security Standards |
+| K04 | Lack of Centralized Policy Enforcement | 🟢 Addressed — Kyverno `ClusterPolicy` rejects pods that aren't non-root / drop caps / disallow privilege escalation (admission-time guardrail) |
 | K05 | Inadequate Logging & Monitoring | 🔴 Learning next — audit logging, runtime visibility |
 | K06 | Broken Authentication | 🟡 N/A for this scope — single demo app, no auth layer yet |
 | K07 | Missing Network Segmentation Controls | 🟢 Addressed — default-deny `NetworkPolicy` with explicit allow for app port + DNS |
-| K08 | Secrets Management Failures | 🟡 In progress — no secrets in image; proper Secret handling to add |
+| K08 | Secrets Management Failures | 🟡 In progress — no secrets in image; Gitleaks secrets scan runs in CI; proper Secret handling to add |
 | K09 | Misconfigured Cluster Components | 🟡 N/A for this scope — using a managed/local cluster |
 | K10 | Outdated and Vulnerable Components | 🟢 Addressed — Trivy tracks CVEs; base kept current |
 
@@ -167,6 +170,57 @@ the ability to modify or delete them.
 
 ---
 
+## Policy enforcement with Kyverno (OWASP K8s K04)
+
+Hardening a single manifest only protects that manifest. Nothing stops someone
+from deploying a *different* pod that runs as root. [Kyverno](https://kyverno.io)
+closes that gap: it's a Kubernetes admission controller that evaluates every pod
+against policy **before it is created**, and rejects anything non-compliant.
+
+This is the Kubernetes equivalent of an AWS Service Control Policy — a
+**preventive guardrail** that enforces the rule in one place instead of relying
+on every author to remember it.
+
+`policies/require-pod-hardening.yaml` rejects any pod that is not non-root, that
+allows privilege escalation, or that does not drop all Linux capabilities.
+
+```bash
+# Install Kyverno, then apply the policy
+kubectl create -f https://github.com/kyverno/kyverno/releases/download/v1.13.4/install.yaml
+kubectl apply -f policies/require-pod-hardening.yaml
+
+# Proof: an un-hardened pod is rejected at admission time
+kubectl run bad --image=nginx --dry-run=server
+# -> blocked: "Pods must run as non-root ... allowPrivilegeEscalation ... drop ALL"
+
+# The hardened Deployment passes the same policy.
+```
+
+> Note: in production, Kyverno itself is a privileged, trusted component (it can
+> see and gate every resource). It would be subject to the same RBAC review,
+> pod hardening, and patching as any other workload — the security tooling is
+> part of the attack surface.
+
+---
+
+## CI security gates (DevSecOps / shift-left)
+
+`.github/workflows/security.yml` runs automated security checks on every push and
+pull request, so problems are caught at commit time rather than in production.
+Each gate targets one of the most common real-world attack vectors:
+
+| Gate | Tool | Defends against |
+|------|------|-----------------|
+| Dependency / CVE scan | Trivy (fs) | Vulnerable components (K02/K10) |
+| Secrets scan | Gitleaks | Leaked credentials (K08) — the #1 breach vector |
+| Manifest / IaC scan | Trivy (config) | Insecure workload config (K01) |
+| Policy check | Kyverno CLI | Manifests validated against our own guardrails (K01/K04) |
+
+The workflow uses least-privilege permissions (`contents: read`) and fails the
+build on HIGH/CRITICAL findings, which can gate merges via branch protection.
+
+---
+
 ## Vulnerability scan (Trivy)
 
 [Trivy](https://github.com/aquasecurity/trivy) scans the image for known CVEs in
@@ -222,11 +276,12 @@ Top 10 risk each item closes. This is my active study plan:
 - [x] CPU/memory resource `requests` and `limits` — *(K01)*
 - [x] Liveness/readiness probes wired to `/health` — *(K01)*
 - [x] `NetworkPolicy` (default-deny, then allow only required traffic) — *(K07)*
-- [ ] Pod Security Standards / admission control for cluster-wide enforcement — *(K04)*
+- [x] Admission-control enforcement (Kyverno) for cluster-wide guardrails — *(K04)*
+- [x] CI pipeline running Trivy + Gitleaks + policy checks on every push — *(K02, K08)*
+- [ ] Pod Security Standards as a second enforcement layer alongside Kyverno — *(K04)*
 - [ ] Proper Kubernetes `Secret` handling (no secrets in image or env) — *(K08)*
 - [ ] Audit logging and runtime monitoring — *(K05)*
 - [ ] Smaller/distroless base image to cut the OS CVE surface — *(K02, K10)*
-- [ ] CI pipeline running Trivy on every push, failing on new HIGH/CRITICAL — *(K02)*
 
 ---
 
@@ -243,5 +298,10 @@ k8s-security-lab/
 │   ├── rbac.yaml       # read-only Role (least privilege)
 │   ├── rolebinding.yaml# binds Role to security-auditor
 │   └── networkpolicy.yaml # default-deny + explicit allow (segmentation)
+├── policies/
+│   └── require-pod-hardening.yaml # Kyverno admission guardrail (K04)
 └── scan.json           # Trivy scan output (generated, git-ignored)
+
+# repo root also contains:
+#   .github/workflows/security.yml  # CI security gates (Trivy, Gitleaks, Kyverno)
 ```
