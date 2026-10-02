@@ -1,0 +1,53 @@
+# NetworkPolicy — OWASP Kubernetes Top 10 K07 (Missing Network Segmentation)
+#
+# By default Kubernetes allows all pod-to-pod traffic. These policies implement
+# a default-deny posture for the security-api pods, then explicitly allow only
+# the traffic the app actually needs. This limits lateral movement: a pod
+# compromised elsewhere in the cluster cannot freely reach this workload.
+#
+# NOTE: NetworkPolicies are only enforced if the cluster CNI supports them
+# (e.g. Calico, Cilium). On clusters without an enforcing CNI they are accepted
+# but have no effect.
+---
+# 1) Default-deny all ingress and egress for the security-api pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: security-api-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app: security-api
+  policyTypes:
+  - Ingress
+  - Egress
+  # Empty ingress/egress rules below == deny everything by default.
+  ingress: []
+  egress: []
+---
+# 2) Explicitly allow the traffic the app needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: security-api-allow
+spec:
+  podSelector:
+    matchLabels:
+      app: security-api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow inbound traffic to the app port from within the cluster.
+  - ports:
+    - protocol: TCP
+      port: 5000
+  egress:
+  # Allow DNS resolution (pods need this to function at all).
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53

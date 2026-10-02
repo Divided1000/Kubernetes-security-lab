@@ -17,9 +17,63 @@ spec:
         app: security-api
 
     spec:
+      # Pod-level security context: enforced by the kubelet for every container.
+      securityContext:
+        runAsNonRoot: true          # refuse to start if the image runs as root (UID 0)
+        runAsUser: 10001            # the non-root appuser baked into the Dockerfile
+        runAsGroup: 10001
+        fsGroup: 10001              # group ownership for any mounted volumes
+        seccompProfile:
+          type: RuntimeDefault      # apply the runtime's default syscall filter
+
       containers:
       - name: api
         image: k8s-security-api
 
         ports:
         - containerPort: 5000
+
+        # Container-level security context: least privilege for the process.
+        securityContext:
+          allowPrivilegeEscalation: false   # block setuid-based privilege gains
+          readOnlyRootFilesystem: true      # immutable fs; no dropping files/binaries
+          capabilities:
+            drop:
+            - ALL                           # strip all Linux capabilities
+
+        # readOnlyRootFilesystem means we must provide writable scratch space
+        # explicitly. /tmp is backed by an ephemeral emptyDir, not the image.
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+
+        # Resource requests/limits: requests guide scheduling, limits cap usage.
+        # Without limits a compromised/buggy pod can exhaust the node (DoS).
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "250m"
+            memory: "128Mi"
+
+        # Readiness: gate Service traffic until the app can serve /health.
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 3
+          periodSeconds: 10
+
+        # Liveness: restart the container if /health stops responding.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+
+      # Ephemeral writable scratch volume for the read-only-rootfs container.
+      volumes:
+      - name: tmp
+        emptyDir: {}

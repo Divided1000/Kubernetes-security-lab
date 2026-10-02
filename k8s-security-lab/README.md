@@ -43,13 +43,13 @@ about what's done and what I'm still learning:
 
 | # | OWASP K8s risk | Status in this lab |
 |---|----------------|--------------------|
-| K01 | Insecure Workload Configurations | 🟡 Partial — image runs as non-root; still adding pod `securityContext`, `readOnlyRootFilesystem`, dropped capabilities |
+| K01 | Insecure Workload Configurations | 🟢 Addressed — non-root `securityContext` (`runAsNonRoot`, dropped capabilities, `readOnlyRootFilesystem`, `seccompProfile`), resource limits, liveness/readiness probes |
 | K02 | Supply Chain Vulnerabilities | 🟢 Addressed — Trivy image scan + triage; base image patched |
 | K03 | Overly Permissive RBAC | 🟢 Addressed — read-only `Role` scoped to `get`/`list` only |
 | K04 | Lack of Centralized Policy Enforcement | 🔴 Learning next — admission control / Pod Security Standards |
 | K05 | Inadequate Logging & Monitoring | 🔴 Learning next — audit logging, runtime visibility |
 | K06 | Broken Authentication | 🟡 N/A for this scope — single demo app, no auth layer yet |
-| K07 | Missing Network Segmentation Controls | 🔴 Learning next — `NetworkPolicy` default-deny |
+| K07 | Missing Network Segmentation Controls | 🟢 Addressed — default-deny `NetworkPolicy` with explicit allow for app port + DNS |
 | K08 | Secrets Management Failures | 🟡 In progress — no secrets in image; proper Secret handling to add |
 | K09 | Misconfigured Cluster Components | 🟡 N/A for this scope — using a managed/local cluster |
 | K10 | Outdated and Vulnerable Components | 🟢 Addressed — Trivy tracks CVEs; base kept current |
@@ -124,11 +124,38 @@ kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/rbac.yaml
 kubectl apply -f k8s/rolebinding.yaml
+kubectl apply -f k8s/networkpolicy.yaml
 
 # Check it's running
 kubectl get pods -l app=security-api
 kubectl get svc security-api-service
 ```
+
+> Tip: validate manifests without touching the cluster using
+> `kubectl apply --dry-run=server -f k8s/<file>.yaml`.
+
+### Workload hardening (OWASP K8s K01)
+
+`k8s/deployment.yaml` applies defense-in-depth at the orchestration layer, so a
+bad image can't quietly undo the Dockerfile hardening:
+
+- **Pod `securityContext`** — `runAsNonRoot: true`, pinned `runAsUser: 10001`,
+  and `seccompProfile: RuntimeDefault` (blocks dangerous syscalls).
+- **Container `securityContext`** — `allowPrivilegeEscalation: false`,
+  `readOnlyRootFilesystem: true`, and `capabilities: drop: [ALL]`. Writable
+  scratch space is provided explicitly via an ephemeral `emptyDir` at `/tmp`.
+- **Resource `requests`/`limits`** — caps CPU/memory so a compromised or buggy
+  pod can't exhaust the node (a denial-of-service path).
+- **Liveness & readiness probes** — both hit `/health`, so traffic is only sent
+  to ready pods and wedged containers get restarted.
+
+### Network segmentation (OWASP K8s K07)
+
+`k8s/networkpolicy.yaml` flips the pod from Kubernetes' default allow-all to
+**default-deny**, then explicitly allows only inbound traffic to port 5000 and
+outbound DNS. This limits lateral movement if another pod in the cluster is
+compromised. Note: enforcement requires a CNI that implements NetworkPolicy
+(e.g. Calico, Cilium).
 
 ### Least-privilege RBAC
 
@@ -190,11 +217,11 @@ Base image: **Debian 13.7** · Artifact: `k8s-security-api`
 Honest list of what this lab does **not** yet do, mapped to the OWASP Kubernetes
 Top 10 risk each item closes. This is my active study plan:
 
-- [ ] Pod `securityContext`: `runAsNonRoot`, `readOnlyRootFilesystem`,
+- [x] Pod `securityContext`: `runAsNonRoot`, `readOnlyRootFilesystem`,
       `allowPrivilegeEscalation: false`, drop all Linux capabilities — *(K01)*
-- [ ] CPU/memory resource `requests` and `limits` — *(K01)*
-- [ ] Liveness/readiness probes wired to `/health` — *(K01)*
-- [ ] `NetworkPolicy` (default-deny, then allow only required traffic) — *(K07)*
+- [x] CPU/memory resource `requests` and `limits` — *(K01)*
+- [x] Liveness/readiness probes wired to `/health` — *(K01)*
+- [x] `NetworkPolicy` (default-deny, then allow only required traffic) — *(K07)*
 - [ ] Pod Security Standards / admission control for cluster-wide enforcement — *(K04)*
 - [ ] Proper Kubernetes `Secret` handling (no secrets in image or env) — *(K08)*
 - [ ] Audit logging and runtime monitoring — *(K05)*
@@ -214,6 +241,7 @@ k8s-security-lab/
 │   ├── deployment.yaml # Deployment, 2 replicas
 │   ├── service.yaml    # NodePort service, 80 -> 5000
 │   ├── rbac.yaml       # read-only Role (least privilege)
-│   └── rolebinding.yaml# binds Role to security-auditor
+│   ├── rolebinding.yaml# binds Role to security-auditor
+│   └── networkpolicy.yaml # default-deny + explicit allow (segmentation)
 └── scan.json           # Trivy scan output (generated, git-ignored)
 ```
