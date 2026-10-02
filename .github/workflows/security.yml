@@ -1,0 +1,111 @@
+# CI Security Gates (DevSecOps / "shift left")
+# ============================================
+# Runs automated security checks on every push and pull request. The goal is to
+# catch security problems at commit time — before they ever reach a cluster —
+# and to make the checks automatic so no human has to remember to run them.
+#
+# Each job maps to an OWASP Kubernetes Top 10 risk:
+#   - trivy-fs        -> K02/K10  Supply chain & vulnerable components
+#   - secrets-scan    -> K08      Secrets management failures
+#   - iac-scan        -> K01      Insecure workload configuration (static)
+#   - kyverno-test    -> K01/K04  Manifests validated against our own policy
+#
+# NOTE: Jobs that find issues will FAIL the build (red X), which is the point —
+# a failing gate is a signal, not a bug. Severity thresholds are tuned so the
+# pipeline is useful rather than noisy.
+
+name: security
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+permissions:
+  contents: read          # least privilege: the workflow only needs to read code
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Dependency / OS vulnerability scan (OWASP K8s K02, K10)
+  #    Scans the repo filesystem for known-vulnerable packages and CVEs.
+  # ---------------------------------------------------------------------------
+  trivy-fs:
+    name: Trivy vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy (filesystem)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # Fail the build only on HIGH/CRITICAL to avoid alert fatigue from
+          # the long tail of LOW/MEDIUM findings.
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true   # don't fail on CVEs with no available patch
+          format: table
+
+  # ---------------------------------------------------------------------------
+  # 2) Secrets scan (OWASP K8s K08)
+  #    Leaked credentials are the #1 real-world breach vector. This blocks
+  #    passwords, API keys, and tokens from being committed.
+  # ---------------------------------------------------------------------------
+  secrets-scan:
+    name: Gitleaks secrets scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # scan full git history, not just the latest commit
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # 3) Infrastructure-as-Code / manifest scan (OWASP K8s K01)
+  #    Statically inspects Kubernetes YAML and the Dockerfile for insecure
+  #    settings BEFORE deploy. Complements Kyverno, which enforces at runtime.
+  # ---------------------------------------------------------------------------
+  iac-scan:
+    name: Trivy IaC/config scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy (config)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: table
+
+  # ---------------------------------------------------------------------------
+  # 4) Policy test (OWASP K8s K01, K04)
+  #    Runs our own Kyverno policy against the lab manifests, so the manifests
+  #    are continuously verified against the guardrails we enforce on-cluster.
+  # ---------------------------------------------------------------------------
+  kyverno-test:
+    name: Kyverno policy check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Kyverno CLI
+        run: |
+          VERSION=v1.13.4
+          curl -sfL "https://github.com/kyverno/kyverno/releases/download/${VERSION}/kyverno-cli_${VERSION}_linux_x86_64.tar.gz" \
+            | tar -xz -C /tmp
+          sudo mv /tmp/kyverno /usr/local/bin/kyverno
+          kyverno version
+
+      - name: Apply policy against the lab manifests
+        run: |
+          kyverno apply k8s-security-lab/policies/ \
+            --resource k8s-security-lab/k8s/deployment.yaml
