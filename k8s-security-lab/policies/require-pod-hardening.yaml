@@ -33,6 +33,17 @@ spec:
       - resources:
           kinds:
           - Pod
+    # Exempt trusted, privileged infrastructure namespaces. Security/platform
+    # tooling (Falco needs kernel access; Kyverno is the policy engine itself)
+    # legitimately cannot meet app-level hardening. We exclude the namespaces,
+    # NOT weaken the rule for application workloads.
+    exclude:
+      any:
+      - resources:
+          namespaces:
+          - kube-system
+          - kyverno
+          - falco
     validate:
       message: >-
         Pods must run as non-root. Set
@@ -57,6 +68,13 @@ spec:
       - resources:
           kinds:
           - Pod
+    exclude:
+      any:
+      - resources:
+          namespaces:
+          - kube-system
+          - kyverno
+          - falco
     validate:
       message: >-
         Privilege escalation must be disabled. Set
@@ -76,6 +94,13 @@ spec:
       - resources:
           kinds:
           - Pod
+    exclude:
+      any:
+      - resources:
+          namespaces:
+          - kube-system
+          - kyverno
+          - falco
     validate:
       message: >-
         Containers must drop ALL Linux capabilities. Set

@@ -54,7 +54,7 @@ service, Elevation of privilege.
 |--------|------------------------|------------------|--------------|
 | **S**poofing | Caller pretends to be an authorized cluster user | RBAC (`security-reader` least-privilege Role) | App itself has no authn (out of scope, §4) |
 | **T**ampering | Attacker modifies the running container (drops a binary/webshell) | `readOnlyRootFilesystem`, image scanning in CI | Base-image CVEs without upstream fixes remain |
-| **R**epudiation | Action taken with no record | — | No audit logging yet (K05, roadmap) |
+| **R**epudiation | Action taken with no record | Falco runtime detection rules written (shell/sensitive-file/pkg-tool in app container) | Live capture pending a supported-kernel cluster; audit logging still to add (K05) |
 | **I**nfo disclosure | Secrets leaked via image, git, or logs | No secrets in image; Gitleaks in CI | Full Secret management not implemented (K08) |
 | **D**enial of service | Pod exhausts node CPU/memory | Resource `requests`/`limits` | No cluster-wide quota; single app only |
 | **E**levation of privilege | Container escape → host/cluster | Non-root, drop ALL caps, `allowPrivilegeEscalation: false`, seccomp `RuntimeDefault`; Kyverno enforces these cluster-wide | Kernel 0-days; Kyverno itself is privileged (§5) |
@@ -117,9 +117,11 @@ How a real attacker would approach this, and what stops them:
 4. **Move laterally** — pivot to other pods or the cluster.
    *Mitigation:* default-deny NetworkPolicy; Kyverno blocks deploying a
    privileged pivot pod.
-5. **Act undetected** — the current biggest gap.
-   *Mitigation needed:* audit logging and runtime monitoring (K05) — on the
-   roadmap. **Assume breach; you must be able to see it.**
+5. **Act undetected** — partially addressed.
+   *Mitigation:* Falco runtime detection rules written to catch shells, sensitive
+   file reads, and runtime tooling inside the app container (K05). Live capture
+   needs a supported-kernel cluster; audit logging still to add. **Assume breach;
+   you must be able to see it.**
 
 The honest takeaway: this lab significantly reduces the container/orchestration
 attack surface, but no system has zero risk. Security is a posture, not a finish

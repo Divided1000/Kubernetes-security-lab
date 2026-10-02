@@ -1,0 +1,86 @@
+# Custom Falco rules — runtime threat detection for the security-api app
+# (OWASP Kubernetes Top 10 K05 — Inadequate Logging & Monitoring)
+#
+# Falco watches kernel syscalls and raises alerts when runtime behavior matches
+# a rule. Prevention (securityContext, Kyverno, NetworkPolicy) tries to stop bad
+# things; detection assumes something gets through and makes it VISIBLE.
+#
+# These are detection-engineering rules tailored to this app: the security-api
+# container only ever runs `python app.py`. Anything else inside it — a shell,
+# reading sensitive files, a package manager — is suspicious by definition.
+#
+# Load alongside Falco's default rules:
+#   helm install falco falcosecurity/falco \
+#     --set driver.kind=auto \
+#     --set-file customRules."custom-rules\.yaml"=falco/custom-rules.yaml
+#
+# Validate syntax without a running cluster:
+#   falco --validate falco/custom-rules.yaml
+
+# ---------------------------------------------------------------------------
+# Macro: identify our application's containers by image name.
+# ---------------------------------------------------------------------------
+- macro: security_api_container
+  condition: container.image.repository contains "k8s-security-api"
+
+# ---------------------------------------------------------------------------
+# Rule 1: a shell spawned inside the app container.
+# The app only runs Python — an interactive shell means someone is in there.
+# This is the classic "attacker got a foothold" signal.
+# ---------------------------------------------------------------------------
+- rule: Shell Spawned in security-api Container
+  desc: >-
+    A shell process was executed inside the security-api container, which should
+    only ever run the Python application. Possible container compromise.
+  condition: >-
+    spawned_process
+    and security_api_container
+    and shell_procs
+  output: >-
+    Shell spawned in security-api container
+    (user=%user.name shell=%proc.name parent=%proc.pname
+     container=%container.name image=%container.image.repository
+     cmdline=%proc.cmdline)
+  priority: WARNING
+  tags: [container, shell, mitre_execution, T1059]
+
+# ---------------------------------------------------------------------------
+# Rule 2: reading sensitive credential files from inside the app container.
+# The app has no reason to read /etc/shadow or SSH keys.
+# ---------------------------------------------------------------------------
+- rule: Sensitive File Read in security-api Container
+  desc: >-
+    A process in the security-api container opened a sensitive credential file.
+    The application never needs these; likely credential theft / recon.
+  condition: >-
+    open_read
+    and security_api_container
+    and (fd.name in (/etc/shadow, /etc/sudoers)
+         or fd.name startswith /root/.ssh
+         or fd.name startswith /home)
+  output: >-
+    Sensitive file read in security-api container
+    (user=%user.name file=%fd.name proc=%proc.name
+     container=%container.name image=%container.image.repository)
+  priority: CRITICAL
+  tags: [container, filesystem, mitre_credential_access, T1552]
+
+# ---------------------------------------------------------------------------
+# Rule 3: package manager or download tool run inside the app container.
+# A read-only, hardened app image should never install software at runtime —
+# that pattern is typical of an attacker pulling in tooling after a breach.
+# ---------------------------------------------------------------------------
+- rule: Package Management Tool in security-api Container
+  desc: >-
+    A package manager or download utility ran inside the security-api container.
+    The image is immutable at runtime; this suggests post-exploitation tooling.
+  condition: >-
+    spawned_process
+    and security_api_container
+    and proc.name in (apt, apt-get, dpkg, pip, pip3, curl, wget, apk)
+  output: >-
+    Package/download tool run in security-api container
+    (user=%user.name tool=%proc.name cmdline=%proc.cmdline
+     container=%container.name image=%container.image.repository)
+  priority: WARNING
+  tags: [container, software_mgmt, mitre_execution]

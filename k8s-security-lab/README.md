@@ -50,7 +50,7 @@ about what's done and what I'm still learning:
 | K02 | Supply Chain Vulnerabilities | 🟢 Addressed — Trivy image scan + triage; base image patched; Trivy runs in CI on every push |
 | K03 | Overly Permissive RBAC | 🟢 Addressed — read-only `Role` scoped to `get`/`list` only |
 | K04 | Lack of Centralized Policy Enforcement | 🟢 Addressed — Kyverno `ClusterPolicy` rejects pods that aren't non-root / drop caps / disallow privilege escalation (admission-time guardrail) |
-| K05 | Inadequate Logging & Monitoring | 🔴 Learning next — audit logging, runtime visibility |
+| K05 | Inadequate Logging & Monitoring | 🟡 In progress — Falco runtime detection deployed + custom detection rules written; live kernel capture limited on local arm64 (see Runtime Detection section) |
 | K06 | Broken Authentication | 🟡 N/A for this scope — single demo app, no auth layer yet |
 | K07 | Missing Network Segmentation Controls | 🟢 Addressed — default-deny `NetworkPolicy` with explicit allow for app port + DNS |
 | K08 | Secrets Management Failures | 🟡 In progress — no secrets in image; Gitleaks secrets scan runs in CI; proper Secret handling to add |
@@ -221,7 +221,77 @@ build on HIGH/CRITICAL findings, which can gate merges via branch protection.
 
 ---
 
-## Vulnerability scan (Trivy)
+## Runtime threat detection with Falco (OWASP K8s K05)
+
+Everything above is **prevention** — stopping bad things from happening. But a
+mature posture assumes prevention will eventually fail, so you also need
+**detection**: the ability to see malicious activity in a *running* container.
+That is the Prevent → Detect → Respond model, and this piece is **Detect**.
+
+[Falco](https://falco.org) is the CNCF-graduated standard for Kubernetes runtime
+security. It taps kernel syscalls and raises alerts when behavior matches a rule
+(e.g. a shell spawning inside a container that should only run one process).
+
+> **Important:** Falco **detects and alerts** — it does not block or remediate by
+> itself. Response (killing/isolating a pod) is a separate layer (e.g. Falco
+> Talon, falcosidekick + SOAR, or a human). This lab covers detection.
+
+### Custom detection rules (detection engineering)
+
+`falco/custom-rules.yaml` contains rules tailored to this app. The security-api
+container only ever runs `python app.py`, so anything else inside it is
+suspicious by definition:
+
+| Rule | Fires when | Priority |
+|------|-----------|----------|
+| Shell Spawned in security-api Container | an interactive shell runs in the app container | WARNING |
+| Sensitive File Read in security-api Container | `/etc/shadow`, SSH keys, etc. are read | CRITICAL |
+| Package Management Tool in security-api Container | `apt`/`pip`/`curl`/`wget` run at runtime | WARNING |
+
+Writing and tuning rules like these — deciding what "suspicious" means for *this*
+workload — is the detection-engineering skill (the same discipline as writing
+SIEM detections, just at the syscall layer).
+
+Validate the rules without a cluster:
+
+```bash
+falco --validate falco/custom-rules.yaml
+```
+
+### Install (on a cluster with a supported kernel)
+
+```bash
+helm repo add falcosecurity https://falcosecurity.github.io/charts
+helm install falco falcosecurity/falco \
+  --namespace falco --create-namespace \
+  --set driver.kind=auto \
+  --set-file customRules."custom-rules\.yaml"=falco/custom-rules.yaml
+
+# Watch alerts live in one terminal:
+kubectl logs -n falco -l app.kubernetes.io/name=falco -c falco -f
+
+# Trigger a detection in another terminal:
+kubectl exec -it deploy/security-api -- sh    # -> "Shell spawned in security-api container"
+```
+
+### Honest note on the local environment
+
+Falco was installed and attempted on two local clusters on an **Apple Silicon
+(arm64) Mac**:
+
+- **Docker Desktop (linuxkit kernel):** the modern eBPF probe could not attach —
+  the kernel does not expose the required syscall tracepoints.
+- **minikube (Buildroot 6.6 kernel):** modern eBPF failed (kernel built without
+  BTF), and the kernel-module driver failed to load (`Unknown symbol
+  tracepoint_probe_register` — tracepoint symbols not exported for modules).
+
+This is a real limitation of these local arm64 kernels, not a configuration
+error — Falco's drivers need kernel features (BTF or exported tracepoints) that
+neither local kernel provides. **Live capture works out of the box on a managed
+cluster** (EKS/GKE) or a VM with a standard distro kernel. The rules above are
+valid and portable; the detection design is complete and ready to run where the
+kernel supports it. Capturing live alerts on a cloud cluster is the next step on
+the roadmap.
 
 [Trivy](https://github.com/aquasecurity/trivy) scans the image for known CVEs in
 OS packages and language dependencies.
@@ -300,6 +370,8 @@ k8s-security-lab/
 │   └── networkpolicy.yaml # default-deny + explicit allow (segmentation)
 ├── policies/
 │   └── require-pod-hardening.yaml # Kyverno admission guardrail (K04)
+├── falco/
+│   └── custom-rules.yaml  # runtime threat-detection rules (K05)
 └── scan.json           # Trivy scan output (generated, git-ignored)
 
 # repo root also contains:
