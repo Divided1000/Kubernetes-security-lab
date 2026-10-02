@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+
+metadata:
+  name: security-reader-binding
+
+subjects:
+- kind: User
+  name: security-auditor
+  apiGroup: rbac.authorization.k8s.io
+
+roleRef:
+  kind: Role
+  name: security-reader
+  apiGroup: rbac.authorization.k8s.io
+

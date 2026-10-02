@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: security-api
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: security-api
+
+  template:
+    metadata:
+      labels:
+        app: security-api
+
+    spec:
+      containers:
+      - name: api
+        image: k8s-security-api
+
+        ports:
+        - containerPort: 5000
