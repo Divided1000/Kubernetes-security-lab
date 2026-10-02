@@ -1,0 +1,15 @@
+# Generated vulnerability scan reports
+scan.json
+
+# Editor / backup files
+*.save
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS cruft
+.DS_Store
